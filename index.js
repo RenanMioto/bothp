@@ -1,5 +1,5 @@
-// index.js — Pedido + Defesa + Anexos + Painel da Comissão (ephemeral)
-//         + Decisão anônima + Tags no Fórum + Guardião de mensagens
+// index.js — Pedido + User Select do Requerido + Defesa + Anexos + Painel da Comissão (ephemeral)
+//         + Decisão anônima + Tags no Fórum + Guardião de mensagens + Menções restritas
 import 'dotenv/config';
 import {
   ActionRowBuilder,
@@ -16,6 +16,7 @@ import {
   Routes,
   TextInputBuilder,
   TextInputStyle,
+  UserSelectMenuBuilder,
 } from 'discord.js';
 
 const {
@@ -44,7 +45,7 @@ async function registerCommands() {
 
 /* ===================== Utils ===================== */
 const colorInt = () => (EMBED_COLOR ? parseInt(EMBED_COLOR.replace('#', ''), 16) : undefined);
-const isEvidenceAttachment = () => true; // ajuste se quiser filtrar por extensão/MIME
+const isEvidenceAttachment = () => true; // se quiser, filtre por extensão/MIME
 
 function hasStaffPerm(member) {
   return Boolean(
@@ -53,22 +54,6 @@ function hasStaffPerm(member) {
     member?.permissions?.has(PermissionFlagsBits.ManageThreads) ||
     member?.permissions?.has(PermissionFlagsBits.ManageMessages)
   );
-}
-
-async function resolveRequerido(interaction, input) {
-  const m = input.match(/^<@!?(\d+)>$/);
-  if (m) { try { return await interaction.client.users.fetch(m[1]); } catch {} }
-  try {
-    const guild = await interaction.client.guilds.fetch(interaction.guildId);
-    const members = await guild.members.fetch();
-    const lower = input.toLowerCase();
-    const found = members.find(mem =>
-      mem.user.username.toLowerCase() === lower ||
-      (mem.nickname && mem.nickname.toLowerCase() === lower) ||
-      mem.displayName.toLowerCase() === lower
-    );
-    return found?.user || null;
-  } catch { return null; }
 }
 
 function findForumTagIdByName(availableTags, targetNames) {
@@ -89,6 +74,8 @@ const defenseSessions = new Map();
 const evidenceSessions = new Map();
 // threadId -> { userIds:Set<string>, roleIds:Set<string> } (quem pode falar)
 const allowedByThread = new Map();
+// userId -> { requeridoId, exp } (seleção do requerido antes do modal)
+const analisePick = new Map();
 
 function buildAllowedSet({ comissaoRoleId, diretoriaRoleId, requerenteId, requeridoId }) {
   return {
@@ -98,7 +85,9 @@ function buildAllowedSet({ comissaoRoleId, diretoriaRoleId, requerenteId, requer
 }
 
 /* ===================== Bot ===================== */
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages],
+});
 
 client.once(Events.ClientReady, () => {
   console.log(`🚀 Logado como ${client.user.tag}`);
@@ -147,51 +136,60 @@ client.on(Events.MessageCreate, async (msg) => {
 /* ------------------------ Interações ------------------------ */
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    /* ========== /analise -> Modal ========== */
+    /* ========== /analise → User Select do Requerido ========== */
     if (interaction.isChatInputCommand() && interaction.commandName === 'analise') {
+      const select = new UserSelectMenuBuilder()
+        .setCustomId('pick_requerido')
+        .setPlaceholder('Selecione o piloto requerido…')
+        .setMinValues(1)
+        .setMaxValues(1);
+
+      const row = new ActionRowBuilder().addComponents(select);
+
+      return interaction.reply({
+        content: '👤 Escolha **quem será o Requerido**. Depois abrirei o formulário.',
+        components: [row],
+        flags: 64,
+      });
+    }
+
+    /* ========== Handler do User Select: guardar e abrir modal ========== */
+    if (interaction.isUserSelectMenu?.() && interaction.customId === 'pick_requerido') {
+      const [requeridoId] = interaction.values || [];
+      if (!requeridoId) {
+        return interaction.reply({ content: '⚠️ Selecione um piloto.', flags: 64 });
+      }
+
+      analisePick.set(interaction.user.id, { requeridoId, exp: Date.now() + 10 * 60 * 1000 });
+
       const modal = new ModalBuilder().setCustomId('analise_modal').setTitle('Pedido de Análise');
 
-      const requerido = new TextInputBuilder()
-        .setCustomId('requerido')
-        .setLabel('Requerido (nome do piloto)') // sem @
-        .setStyle(TextInputStyle.Short).setRequired(true);
-
-      const linkVideo = new TextInputBuilder()
-        .setCustomId('linkVideo')
-        .setLabel('Link do vídeo (opcional)')
-        .setStyle(TextInputStyle.Short).setRequired(false);
-
-      const paragrafo = new TextInputBuilder()
-        .setCustomId('paragrafo')
-        .setLabel('Parágrafo (ex.: 14.5)')
-        .setStyle(TextInputStyle.Short).setRequired(true);
-
-      const tipoDano = new TextInputBuilder()
-        .setCustomId('tipoDano')
-        .setLabel('Tipo de dano')
-        .setStyle(TextInputStyle.Short).setRequired(true);
-
-      const argumento = new TextInputBuilder()
-        .setCustomId('argumento')
-        .setLabel('Argumento (explique o lance)')
-        .setStyle(TextInputStyle.Paragraph).setRequired(true);
+      const linkVideo = new TextInputBuilder().setCustomId('linkVideo').setLabel('Link do vídeo (opcional)').setStyle(TextInputStyle.Short).setRequired(false);
+      const paragrafo = new TextInputBuilder().setCustomId('paragrafo').setLabel('Parágrafo (ex.: 14.5)').setStyle(TextInputStyle.Short).setRequired(true);
+      const tipoDano = new TextInputBuilder().setCustomId('tipoDano').setLabel('Tipo de dano').setStyle(TextInputStyle.Short).setRequired(true);
+      const argumento = new TextInputBuilder().setCustomId('argumento').setLabel('Argumento (explique o lance)').setStyle(TextInputStyle.Paragraph).setRequired(true);
 
       modal.addComponents(
-        new ActionRowBuilder().addComponents(requerido),
         new ActionRowBuilder().addComponents(linkVideo),
         new ActionRowBuilder().addComponents(paragrafo),
         new ActionRowBuilder().addComponents(tipoDano),
         new ActionRowBuilder().addComponents(argumento),
       );
 
-      await interaction.showModal(modal);
-      return;
+      return interaction.showModal(modal);
     }
 
-    /* ========== Modal do Pedido ========== */
+    /* ========== Modal do Pedido: usa o requerido escolhido ========== */
     if (interaction.isModalSubmit() && interaction.customId === 'analise_modal') {
+      const pick = analisePick.get(interaction.user.id);
+      if (!pick || pick.exp < Date.now()) {
+        return interaction.reply({ content: '⚠️ Sua seleção do **Requerido** expirou. Use **/analise** novamente.', flags: 64 });
+      }
+
       const requerente = interaction.user;
-      const requeridoInput = interaction.fields.getTextInputValue('requerido').trim();
+      const requeridoUser = await interaction.client.users.fetch(pick.requeridoId).catch(() => null);
+      const mentionRequerido = requeridoUser ? `<@${requeridoUser.id}>` : null;
+
       const linkVideo = (interaction.fields.getTextInputValue('linkVideo') || '').trim();
       const paragrafo = interaction.fields.getTextInputValue('paragrafo').trim();
       const tipoDano = interaction.fields.getTextInputValue('tipoDano').trim();
@@ -201,18 +199,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.reply({ content: '🔗 Link inválido. Use http(s) ou deixe vazio e anexe o vídeo.', flags: 64 });
       }
 
-      const requeridoUser = await resolveRequerido(interaction, requeridoInput);
-      const mentionRequerido = requeridoUser ? `<@${requeridoUser.id}>` : null;
-
       const requerenteName = interaction.member?.displayName || interaction.user.username;
-      const requeridoName = requeridoUser?.username || requeridoInput;
+      const requeridoName = requeridoUser?.username || 'Desconhecido';
       const threadName = `analise ${requerenteName} vs ${requeridoName}`.slice(0, 90);
 
       const embed = new EmbedBuilder()
         .setTitle('📋 Pedido de Análise')
         .addFields(
           { name: 'Requerente', value: `${requerente}`, inline: false },
-          { name: 'Requerido', value: mentionRequerido || requeridoInput, inline: false },
+          { name: 'Requerido', value: mentionRequerido || requeridoName, inline: false },
           ...(linkVideo ? [{ name: 'Link do vídeo', value: linkVideo, inline: false }] : []),
           { name: 'Parágrafo', value: paragrafo, inline: false },
           { name: 'Tipo de dano', value: tipoDano, inline: true },
@@ -222,25 +217,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .setTimestamp();
       const c = colorInt(); if (c !== undefined) embed.setColor(c);
 
-      // Botões públicos do tópico
-      const btnDefesa = new ButtonBuilder()
-        .setCustomId(`defesa_btn:${requeridoUser ? requeridoUser.id : 'any'}`)
-        .setLabel('Enviar defesa')
-        .setStyle(ButtonStyle.Primary);
-
-      const btnAnexarPedido = new ButtonBuilder()
-        .setCustomId(`attach_pedido:${interaction.user.id}`)
-        .setLabel('Anexar vídeo (pedido)')
-        .setStyle(ButtonStyle.Secondary);
-
-      const btnPainelComissao = new ButtonBuilder()
-        .setCustomId('panel_comissao')
-        .setLabel('Painel da Comissão')
-        .setStyle(ButtonStyle.Secondary);
-
+      // Botões do tópico
+      const btnDefesa = new ButtonBuilder().setCustomId(`defesa_btn:${requeridoUser ? requeridoUser.id : 'any'}`).setLabel('Enviar defesa').setStyle(ButtonStyle.Primary);
+      const btnAnexarPedido = new ButtonBuilder().setCustomId(`attach_pedido:${interaction.user.id}`).setLabel('Anexar vídeo (pedido)').setStyle(ButtonStyle.Secondary);
+      const btnPainelComissao = new ButtonBuilder().setCustomId('panel_comissao').setLabel('Painel da Comissão').setStyle(ButtonStyle.Secondary);
       const rowPublic = new ActionRowBuilder().addComponents(btnDefesa, btnAnexarPedido, btnPainelComissao);
 
-      // ===== construir conteúdo e allowedMentions RESTRITOS =====
+      // Conteúdo e allowedMentions RESTRITOS
       const mentions = [];
       if (mentionRequerido) mentions.push(mentionRequerido);
       if (COMISSAO_ROLE_ID) mentions.push(`<@&${COMISSAO_ROLE_ID}>`);
@@ -250,7 +233,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         users: mentionRequerido ? [requeridoUser.id] : [],
         roles: [COMISSAO_ROLE_ID, DIRETORIA_ROLE_ID].filter(Boolean),
         repliedUser: false,
-        parse: [] // impede parse de everyone/here
+        parse: [], // impede parse de everyone/here
       };
 
       try {
@@ -267,7 +250,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
               content: msgContent,
               embeds: [embed],
               components: [rowPublic],
-              allowedMentions
+              allowedMentions,
             },
             appliedTags: tagInicial ? [tagInicial] : [],
             reason: 'Novo pedido de análise',
@@ -286,7 +269,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
           if (requeridoUser) { try { await requeridoUser.send(`📣 Você foi mencionado em um **pedido de análise** por ${requerente}.\n🔗 ${post.url}`); } catch {} }
 
-          // log opcional
           if (LOG_CHANNEL_ID) {
             try {
               const logCh = await interaction.client.channels.fetch(LOG_CHANNEL_ID);
@@ -294,16 +276,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
             } catch {}
           }
 
+          analisePick.delete(interaction.user.id);
           return interaction.reply({ content: `✅ Pedido enviado em ${post.toString()}`, flags: 64 });
         }
 
-        // Canal de texto
+        // Canal de texto (thread anexo)
         if (target.type === ChannelType.GuildText) {
           const msg = await target.send({
             content: msgContent,
             embeds: [embed],
             components: [rowPublic],
-            allowedMentions
+            allowedMentions,
           });
           const thread = await msg.startThread({
             name: threadName,
@@ -331,6 +314,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             } catch {}
           }
 
+          analisePick.delete(interaction.user.id);
           return interaction.reply({ content: `✅ Pedido enviado. Discussão: ${thread.toString()}`, flags: 64 });
         }
 
@@ -351,10 +335,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return interaction.reply({ content: '⚠️ Use dentro do tópico da análise.', flags: 64 });
         }
 
-        const bCulpado   = new ButtonBuilder().setCustomId('eval_culpado').setLabel('Culpado').setStyle(ButtonStyle.Danger);
-        const bInocente  = new ButtonBuilder().setCustomId('eval_inocente').setLabel('Inocente').setStyle(ButtonStyle.Success);
-        const bIndefer   = new ButtonBuilder().setCustomId('eval_indeferido').setLabel('Indeferido').setStyle(ButtonStyle.Secondary);
-        const bAttach    = new ButtonBuilder().setCustomId('attach_avaliacao').setLabel('Anexar evidências').setStyle(ButtonStyle.Secondary);
+        const bCulpado  = new ButtonBuilder().setCustomId('eval_culpado').setLabel('Culpado').setStyle(ButtonStyle.Danger);
+        const bInocente = new ButtonBuilder().setCustomId('eval_inocente').setLabel('Inocente').setStyle(ButtonStyle.Success);
+        const bIndefer  = new ButtonBuilder().setCustomId('eval_indeferido').setLabel('Indeferido').setStyle(ButtonStyle.Secondary);
+        const bAttach   = new ButtonBuilder().setCustomId('attach_avaliacao').setLabel('Anexar evidências').setStyle(ButtonStyle.Secondary);
 
         const rowA = new ActionRowBuilder().addComponents(bCulpado, bInocente, bIndefer);
         const rowB = new ActionRowBuilder().addComponents(bAttach);
@@ -362,7 +346,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.reply({
           content: '🛠️ **Painel da Comissão** — escolha o resultado ou anexe evidências.',
           components: [rowA, rowB],
-          flags: 64
+          flags: 64,
         });
       }
 
@@ -405,7 +389,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       // Abrir modal de avaliação (Culpado/Inocente/Indeferido)
-      if (['eval_culpado','eval_inocente','eval_indeferido'].includes(interaction.customId)) {
+      if (['eval_culpado', 'eval_inocente', 'eval_indeferido'].includes(interaction.customId)) {
         if (!hasStaffPerm(interaction.member)) {
           return interaction.reply({ content: '❌ Apenas Comissão/Diretoria podem julgar.', flags: 64 });
         }
@@ -497,7 +481,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       const emb = new EmbedBuilder()
-        .setAuthor({ name: 'Comissão' }) // <- não expõe o comissário
+        .setAuthor({ name: 'Comissão' }) // não expõe o comissário
         .setTitle(`📑 Julgamento — ${resultado}`)
         .addFields(
           ...(link ? [{ name: 'Link de evidência', value: link, inline: false }] : []),

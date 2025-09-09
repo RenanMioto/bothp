@@ -1,16 +1,13 @@
 {
-  "name": "discord-analise-bot-wizard",
-  "version": "1.1.0",
-  "description": "Bot do Discord para pedidos de análise com fluxo passo a passo (wizard).",
+  "name": "bothp",
+  "version": "1.0.0",
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "node --watch index.js",
-    "register": "node register.js"
+    "start": "node index.js"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18.17 <21"
   },
   "dependencies": {
     "discord.js": "^14.16.3",
