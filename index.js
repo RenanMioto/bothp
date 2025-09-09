@@ -1,10 +1,6 @@
-// index.js — Fluxo de Análise com seletor de Requerido, defesa, anexos e julgamento (v14)
-// - Pedido: seletor de usuário + modal simples (link, dano, argumento)
-// - Defesa: modal + opção de anexar vídeo
-// - Comissão: painel com Culpado/Inocente/Indeferido -> modal (Parágrafo, Punição, Argumento)
-// - Decisão anônima + troca de tags no Fórum
-// - Guardião: só envolvidos + Comissão/Diretoria interagem no tópico
-// - TODAS as respostas ephemeral (sem flags: 64)
+// index.js — Bot de Análises (discord.js v14)
+// Fluxo: Pedido → Tópico → Defesa → Julgamento (Comissão) com tags no Fórum
+// Respostas ephemeral e 1-resposta-por-interação garantidas.
 
 import 'dotenv/config';
 import {
@@ -37,11 +33,11 @@ const {
 } = process.env;
 
 if (!DISCORD_TOKEN || !CLIENT_ID || !GUILD_ID || !PEDIDOS_CHANNEL_ID) {
-  console.error('❌ Faltam variáveis no .env (DISCORD_TOKEN, CLIENT_ID, GUILD_ID, PEDIDOS_CHANNEL_ID).');
+  console.error('❌ .env incompleto (DISCORD_TOKEN, CLIENT_ID, GUILD_ID, PEDIDOS_CHANNEL_ID).');
   process.exit(1);
 }
 
-/* ===================== Registro do comando ===================== */
+/* =============== Registro do /analise =============== */
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 async function registerCommands() {
   const commands = [{ name: 'analise', description: 'Abrir pedido de análise.' }];
@@ -51,7 +47,7 @@ async function registerCommands() {
 
 /* ===================== Utils ===================== */
 const colorInt = () => (EMBED_COLOR ? parseInt(EMBED_COLOR.replace('#', ''), 16) : undefined);
-// Se quiser filtrar anexos por tipo, ajuste aqui:
+// Se quiser filtrar anexos por tipo/MIME, ajuste esta função:
 const isEvidenceAttachment = () => true;
 
 function hasStaffPerm(member) {
@@ -74,15 +70,11 @@ function findForumTagIdByName(availableTags, targetNames) {
   return null;
 }
 
-/* ===================== Sessões e controle ===================== */
-// userId -> { threadId, exp }
-const defenseSessions = new Map();
-// userId -> { kind:'pedido'|'defesa'|'avaliacao', threadId, exp }
-const evidenceSessions = new Map();
-// threadId -> { userIds:Set<string>, roleIds:Set<string> } (quem pode falar)
-const allowedByThread = new Map();
-// userId -> { requeridoId, exp } (escolha do requerido antes do modal)
-const analisePick = new Map();
+/* ================= Sessões e guardião ================= */
+const defenseSessions = new Map();      // userId -> { threadId, exp }
+const evidenceSessions = new Map();     // userId -> { kind:'pedido'|'defesa'|'avaliacao', threadId, exp }
+const allowedByThread = new Map();      // threadId -> { userIds:Set, roleIds:Set }
+const analisePick = new Map();          // userId -> { requeridoId, exp }
 
 function buildAllowedSet({ comissaoRoleId, diretoriaRoleId, requerenteId, requeridoId }) {
   return {
@@ -91,7 +83,7 @@ function buildAllowedSet({ comissaoRoleId, diretoriaRoleId, requerenteId, requer
   };
 }
 
-/* ===================== Bot ===================== */
+/* ====================== Bot ====================== */
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages],
 });
@@ -100,9 +92,9 @@ client.once(Events.ClientReady, () => {
   console.log(`🚀 Logado como ${client.user.tag}`);
 });
 
-/* --------- Guardião de mensagens + coletor de anexos --------- */
+/* Guardião e coletor de anexos */
 client.on(Events.MessageCreate, async (msg) => {
-  // Guardião: restringe quem pode responder no tópico
+  // Guardião de quem pode falar
   const allow = allowedByThread.get(msg.channel.id);
   if (allow && !msg.author.bot) {
     const member = msg.member;
@@ -116,7 +108,7 @@ client.on(Events.MessageCreate, async (msg) => {
     }
   }
 
-  // Coletor de anexos (pedido/defesa/avaliação)
+  // Coletor de anexos para sessões em aberto
   const sess = evidenceSessions.get(msg.author.id);
   if (!sess) return;
   if (sess.exp < Date.now()) { evidenceSessions.delete(msg.author.id); return; }
@@ -130,20 +122,20 @@ client.on(Events.MessageCreate, async (msg) => {
     .setTitle(
       sess.kind === 'pedido' ? '📎 Vídeo anexado (pedido)' :
       sess.kind === 'defesa' ? '📎 Vídeo anexado (defesa)' :
-      '🗂️ Evidência anexada (comissão)'
+                               '🗂️ Evidência anexada (comissão)'
     )
     .setDescription(atts.map(a => `• [Arquivo](${a.url})`).join('\n'))
     .setTimestamp();
-  const c2 = colorInt(); if (c2 !== undefined) emb.setColor(c2);
+  const c = colorInt(); if (c !== undefined) emb.setColor(c);
 
   await msg.channel.send({ embeds: [emb] });
   evidenceSessions.delete(msg.author.id);
 });
 
-/* ------------------------ Interações ------------------------ */
+/* ================= Interações ================= */
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    /* ========== /analise → User Select do Requerido ========== */
+    /* -------- /analise -------- */
     if (interaction.isChatInputCommand() && interaction.commandName === 'analise') {
       const select = new UserSelectMenuBuilder()
         .setCustomId('pick_requerido')
@@ -152,7 +144,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .setMaxValues(1);
 
       const row = new ActionRowBuilder().addComponents(select);
-
       return interaction.reply({
         content: '👤 Escolha **quem será o Requerido**. Depois abrirei o formulário.',
         components: [row],
@@ -160,7 +151,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
     }
 
-    /* ========== Handler do User Select: guardar e abrir modal ========== */
+    /* ---- seletor do Requerido → abre modal do pedido ---- */
     if (interaction.isUserSelectMenu?.() && interaction.customId === 'pick_requerido') {
       const [requeridoId] = interaction.values || [];
       if (!requeridoId) {
@@ -169,9 +160,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       analisePick.set(interaction.user.id, { requeridoId, exp: Date.now() + 10 * 60 * 1000 });
 
-      // MODAL DO PEDIDO (simplificado — sem "Parágrafo")
       const modal = new ModalBuilder().setCustomId('analise_modal').setTitle('Pedido de Análise');
-
       const linkVideo = new TextInputBuilder().setCustomId('linkVideo').setLabel('Link do vídeo (opcional)').setStyle(TextInputStyle.Short).setRequired(false);
       const tipoDano  = new TextInputBuilder().setCustomId('tipoDano').setLabel('Tipo de dano').setStyle(TextInputStyle.Short).setRequired(true);
       const argumento = new TextInputBuilder().setCustomId('argumento').setLabel('Argumento (explique o lance)').setStyle(TextInputStyle.Paragraph).setRequired(true);
@@ -183,10 +172,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       );
 
       await interaction.showModal(modal);
-      return; // não responda de novo nesta interação
+      return; // única resposta desta interação
     }
 
-    /* ========== Modal do Pedido ========== */
+    /* ---- submissão do pedido ---- */
     if (interaction.isModalSubmit() && interaction.customId === 'analise_modal') {
       const pick = analisePick.get(interaction.user.id);
       if (!pick || pick.exp < Date.now()) {
@@ -220,25 +209,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
         )
         .setFooter({ text: 'Status: Em análise' })
         .setTimestamp();
-      const c = colorInt(); if (c !== undefined) embed.setColor(c);
+      const c1 = colorInt(); if (c1 !== undefined) embed.setColor(c1);
 
-      // Botões do tópico
+      // botões públicos do tópico
       const btnDefesa = new ButtonBuilder().setCustomId(`defesa_btn:${requeridoUser ? requeridoUser.id : 'any'}`).setLabel('Enviar defesa').setStyle(ButtonStyle.Primary);
       const btnAnexarPedido = new ButtonBuilder().setCustomId(`attach_pedido:${interaction.user.id}`).setLabel('Anexar vídeo (pedido)').setStyle(ButtonStyle.Secondary);
       const btnPainelComissao = new ButtonBuilder().setCustomId('panel_comissao').setLabel('Painel da Comissão').setStyle(ButtonStyle.Secondary);
       const rowPublic = new ActionRowBuilder().addComponents(btnDefesa, btnAnexarPedido, btnPainelComissao);
 
-      // Conteúdo e allowedMentions RESTRITOS
+      // controlar menções
       const mentions = [];
       if (mentionRequerido) mentions.push(mentionRequerido);
       if (COMISSAO_ROLE_ID) mentions.push(`<@&${COMISSAO_ROLE_ID}>`);
       if (DIRETORIA_ROLE_ID) mentions.push(`<@&${DIRETORIA_ROLE_ID}>`);
-      const msgContent = mentions.join(' ');
       const allowedMentions = {
         users: mentionRequerido ? [requeridoUser.id] : [],
         roles: [COMISSAO_ROLE_ID, DIRETORIA_ROLE_ID].filter(Boolean),
         repliedUser: false,
-        parse: [], // impede parse de everyone/here
+        parse: [], // evita @everyone/here
       };
 
       try {
@@ -251,7 +239,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           const post = await target.threads.create({
             name: threadName,
-            message: { content: msgContent, embeds: [embed], components: [rowPublic], allowedMentions },
+            message: { content: mentions.join(' '), embeds: [embed], components: [rowPublic], allowedMentions },
             appliedTags: tagInicial ? [tagInicial] : [],
             reason: 'Novo pedido de análise',
           });
@@ -269,15 +257,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
           if (requeridoUser) { try { await requeridoUser.send(`📣 Você foi mencionado em um **pedido de análise** por ${requerente}.\n🔗 ${post.url}`); } catch {} }
 
           if (LOG_CHANNEL_ID) {
-            try { const logCh = await interaction.client.channels.fetch(LOG_CHANNEL_ID); await logCh.send(`📣 Novo pedido de análise aberto: ${post.url}`); } catch {}
+            try { const logCh = await interaction.client.channels.fetch(LOG_CHANNEL_ID); await logCh.send(`📣 Novo pedido de análise: ${post.url}`); } catch {}
           }
 
           analisePick.delete(interaction.user.id);
           return interaction.reply({ content: `✅ Pedido enviado em ${post.toString()}`, ephemeral: true });
         }
 
+        // alternativa: canal de texto + thread
         if (target.type === ChannelType.GuildText) {
-          const msg = await target.send({ content: msgContent, embeds: [embed], components: [rowPublic], allowedMentions });
+          const msg = await target.send({ content: mentions.join(' '), embeds: [embed], components: [rowPublic], allowedMentions });
           const thread = await msg.startThread({ name: threadName, autoArchiveDuration: 1440, reason: 'Discussão de análise' });
 
           allowedByThread.set(thread.id, buildAllowedSet({
@@ -293,7 +282,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           if (requeridoUser) { try { await requeridoUser.send(`📣 Você foi mencionado em um **pedido de análise** por ${requerente}.\n🔗 ${thread.url}`); } catch {} }
 
           if (LOG_CHANNEL_ID) {
-            try { const logCh = await interaction.client.channels.fetch(LOG_CHANNEL_ID); await logCh.send(`📣 Novo pedido de análise aberto: ${thread.url}`); } catch {}
+            try { const logCh = await interaction.client.channels.fetch(LOG_CHANNEL_ID); await logCh.send(`📣 Novo pedido de análise: ${thread.url}`); } catch {}
           }
 
           analisePick.delete(interaction.user.id);
@@ -306,9 +295,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
     }
 
-    /* ========== Botões: Painel/Anexos/Defesa ========== */
+    /* ----------- Botões ----------- */
     if (interaction.isButton()) {
-      // Painel da Comissão (ephemeral)
+      // Painel da Comissão
       if (interaction.customId === 'panel_comissao') {
         if (!hasStaffPerm(interaction.member)) {
           return interaction.reply({ content: '❌ Apenas Comissão/Diretoria têm acesso ao painel.', ephemeral: true });
@@ -332,7 +321,53 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
 
-      // Anexar vídeo do pedido
+      // Julgamento: abre modal (correção do "interação falhou")
+      if (interaction.customId === 'eval_culpado' || interaction.customId === 'eval_inocente' || interaction.customId === 'eval_indeferido') {
+        if (!hasStaffPerm(interaction.member)) {
+          return interaction.reply({ content: '❌ Apenas Comissão/Diretoria podem julgar.', ephemeral: true });
+        }
+        if (!interaction.channel?.isThread?.()) {
+          return interaction.reply({ content: '⚠️ Use os botões **dentro do tópico** da análise.', ephemeral: true });
+        }
+
+        const resultado =
+          interaction.customId === 'eval_culpado'   ? 'Procedente' :
+          interaction.customId === 'eval_inocente'  ? 'Improcedente' :
+                                                      'Indeferido';
+
+        const modal = new ModalBuilder()
+          .setCustomId(`avaliacao_modal:${resultado}`)
+          .setTitle(`Julgamento — ${resultado}`);
+
+        const parag = new TextInputBuilder()
+          .setCustomId('avaliacao_parag')
+          .setLabel('Parágrafo do regulamento (ex.: 14.5)')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true);
+
+        const puni = new TextInputBuilder()
+          .setCustomId('avaliacao_punicao')
+          .setLabel('Punição (ex.: +5s, advertência...)')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true);
+
+        const arg = new TextInputBuilder()
+          .setCustomId('avaliacao_arg')
+          .setLabel('Argumento da comissão')
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true);
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(parag),
+          new ActionRowBuilder().addComponents(puni),
+          new ActionRowBuilder().addComponents(arg),
+        );
+
+        await interaction.showModal(modal);
+        return; // única resposta desta interação
+      }
+
+      // Anexos (pedido/defesa/avaliacao)
       if (interaction.customId.startsWith('attach_pedido:')) {
         const [, reqId] = interaction.customId.split(':');
         if (interaction.user.id !== reqId && !hasStaffPerm(interaction.member)) {
@@ -345,7 +380,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.reply({ content: '📥 Envie o **arquivo de vídeo** aqui em até **2 minutos**.', ephemeral: true });
       }
 
-      // Anexar evidências (Comissão)
       if (interaction.customId === 'attach_avaliacao') {
         if (!hasStaffPerm(interaction.member)) {
           return interaction.reply({ content: '❌ Apenas Comissão/Diretoria podem anexar evidências.', ephemeral: true });
@@ -357,7 +391,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.reply({ content: '📥 Envie a(s) **imagem(ns)/arquivo(s)** aqui em até **2 minutos**.', ephemeral: true });
       }
 
-      // Anexar vídeo da defesa
       if (interaction.customId.startsWith('attach_defesa:')) {
         const [, reqdId] = interaction.customId.split(':');
         if (interaction.user.id !== reqdId && !hasStaffPerm(interaction.member)) {
@@ -370,7 +403,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.reply({ content: '📥 Envie o **arquivo de vídeo da defesa** aqui em até **2 minutos**.', ephemeral: true });
       }
 
-      // Botão "Enviar defesa" (abre modal) — RESPOSTA ÚNICA: showModal
+      // Enviar defesa → abre modal
       if (interaction.customId.startsWith('defesa_btn:')) {
         const [, alvoId] = interaction.customId.split(':');
         const isMod = hasStaffPerm(interaction.member);
@@ -381,7 +414,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return interaction.reply({ content: '⚠️ Use o botão **dentro do tópico**.', ephemeral: true });
         }
 
-        // prepara sessão rapidamente (sem awaits longos)
         defenseSessions.set(interaction.user.id, { threadId: interaction.channel.id, exp: Date.now() + 30 * 60 * 1000 });
 
         const modal = new ModalBuilder().setCustomId('defesa_modal').setTitle('Defesa do Requerido');
@@ -390,11 +422,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         modal.addComponents(new ActionRowBuilder().addComponents(link), new ActionRowBuilder().addComponents(arg));
 
         await interaction.showModal(modal);
-        return; // importante: não enviar outro reply nesta interação
+        return;
       }
     }
 
-    /* ========== Modal DEFESA ========== */
+    /* ---- submissão da DEFESA ---- */
     if (interaction.isModalSubmit() && interaction.customId === 'defesa_modal') {
       const sess = defenseSessions.get(interaction.user.id);
       if (!sess || (sess.exp && sess.exp < Date.now())) {
@@ -435,15 +467,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    /* ========== Modal AVALIAÇÃO (Comissão) — ANÔNIMA ========== */
+    /* ---- submissão do JULGAMENTO (Comissão) ---- */
     if (interaction.isModalSubmit() && interaction.customId.startsWith('avaliacao_modal:')) {
-      const resultado = interaction.customId.split(':')[1]; // Procedente / Improcedente / Indeferido
+      const resultado = interaction.customId.split(':')[1]; // Procedente/Improcedente/Indeferido
       const paragrafo = interaction.fields.getTextInputValue('avaliacao_parag').trim();
       const punicao   = interaction.fields.getTextInputValue('avaliacao_punicao').trim();
       const argumento = interaction.fields.getTextInputValue('avaliacao_arg').trim();
 
       const emb = new EmbedBuilder()
-        .setAuthor({ name: 'Comissão' }) // não expõe o comissário
+        .setAuthor({ name: 'Comissão' }) // não expõe quem julgou
         .setTitle(`📑 Julgamento — ${resultado}`)
         .addFields(
           { name: 'Parágrafo do regulamento', value: paragrafo.slice(0, 256), inline: false },
@@ -453,7 +485,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .setTimestamp();
       const c4 = colorInt(); if (c4 !== undefined) emb.setColor(c4);
 
-      // botão para anexar evidências complementares (também anônimo)
+      // botão para anexar evidências extras
       const btnAttach = new ButtonBuilder().setCustomId('attach_avaliacao').setLabel('Anexar evidências').setStyle(ButtonStyle.Secondary);
       const row = new ActionRowBuilder().addComponents(btnAttach);
 
@@ -464,7 +496,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         await thread.send({ embeds: [emb], components: [row] });
 
-        // Atualiza TAG no Fórum (se aplicável)
+        // troca de TAG no fórum
         if (thread.type === ChannelType.PublicThread && thread.parent?.type === ChannelType.GuildForum) {
           const tags = thread.parent.availableTags || [];
           const tagId =
@@ -480,23 +512,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         await interaction.reply({ content: '✅ Decisão registrada pela **Comissão**.', ephemeral: true });
 
-        // (Opcional) log interno de auditoria
         if (LOG_CHANNEL_ID) {
           try {
             const ch = await client.channels.fetch(LOG_CHANNEL_ID);
-            await ch.send(`🕵️ Decisão **${resultado}** registrada por ${interaction.user.tag} em ${thread.url}\nParágrafo: ${paragrafo}\nPunição: ${punicao}`);
+            await ch.send(`🕵️ Decisão **${resultado}** por ${interaction.user.tag} — Parágrafo: ${paragrafo} — Punição: ${punicao}`);
           } catch {}
         }
-
       } catch (e) {
         console.error('Falha ao registrar julgamento:', e?.message || e);
         await interaction.reply({ content: '❌ Não consegui registrar o julgamento.', ephemeral: true });
       }
       return;
     }
-
-    /* ========== Botões já tratados acima; nada mais aqui ========== */
-
   } catch (err) {
     console.error(err);
     try { await interaction.reply({ content: 'Ocorreu um erro ao processar.', ephemeral: true }); } catch {}
