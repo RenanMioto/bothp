@@ -1,5 +1,11 @@
-// index.js — Pedido + User Select do Requerido + Defesa + Anexos + Painel da Comissão (ephemeral)
-//         + Decisão anônima + Tags no Fórum + Guardião de mensagens + Menções restritas
+// index.js — Fluxo de Análise com seletor de Requerido, defesa, anexos e julgamento (v14)
+// - Pedido: seletor de usuário + modal simples (link, dano, argumento)
+// - Defesa: modal + opção de anexar vídeo
+// - Comissão: painel com Culpado/Inocente/Indeferido -> modal (Parágrafo, Punição, Argumento)
+// - Decisão anônima + troca de tags no Fórum
+// - Guardião: só envolvidos + Comissão/Diretoria interagem no tópico
+// - TODAS as respostas ephemeral (sem flags: 64)
+
 import 'dotenv/config';
 import {
   ActionRowBuilder,
@@ -45,7 +51,8 @@ async function registerCommands() {
 
 /* ===================== Utils ===================== */
 const colorInt = () => (EMBED_COLOR ? parseInt(EMBED_COLOR.replace('#', ''), 16) : undefined);
-const isEvidenceAttachment = () => true; // se quiser, filtre por extensão/MIME
+// Se quiser filtrar anexos por tipo, ajuste aqui:
+const isEvidenceAttachment = () => true;
 
 function hasStaffPerm(member) {
   return Boolean(
@@ -74,7 +81,7 @@ const defenseSessions = new Map();
 const evidenceSessions = new Map();
 // threadId -> { userIds:Set<string>, roleIds:Set<string> } (quem pode falar)
 const allowedByThread = new Map();
-// userId -> { requeridoId, exp } (seleção do requerido antes do modal)
+// userId -> { requeridoId, exp } (escolha do requerido antes do modal)
 const analisePick = new Map();
 
 function buildAllowedSet({ comissaoRoleId, diretoriaRoleId, requerenteId, requeridoId }) {
@@ -149,7 +156,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return interaction.reply({
         content: '👤 Escolha **quem será o Requerido**. Depois abrirei o formulário.',
         components: [row],
-        flags: 64,
+        ephemeral: true,
       });
     }
 
@@ -157,7 +164,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isUserSelectMenu?.() && interaction.customId === 'pick_requerido') {
       const [requeridoId] = interaction.values || [];
       if (!requeridoId) {
-        return interaction.reply({ content: '⚠️ Selecione um piloto.', flags: 64 });
+        return interaction.reply({ content: '⚠️ Selecione um piloto.', ephemeral: true });
       }
 
       analisePick.set(interaction.user.id, { requeridoId, exp: Date.now() + 10 * 60 * 1000 });
@@ -175,14 +182,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
         new ActionRowBuilder().addComponents(argumento),
       );
 
-      return interaction.showModal(modal);
+      await interaction.showModal(modal);
+      return; // não responda de novo nesta interação
     }
 
     /* ========== Modal do Pedido ========== */
     if (interaction.isModalSubmit() && interaction.customId === 'analise_modal') {
       const pick = analisePick.get(interaction.user.id);
       if (!pick || pick.exp < Date.now()) {
-        return interaction.reply({ content: '⚠️ Sua seleção do **Requerido** expirou. Use **/analise** novamente.', flags: 64 });
+        return interaction.reply({ content: '⚠️ Sua seleção do **Requerido** expirou. Use **/analise** novamente.', ephemeral: true });
       }
 
       const requerente = interaction.user;
@@ -194,7 +202,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const argumento = interaction.fields.getTextInputValue('argumento').trim();
 
       if (linkVideo && !/^https?:\/\/\S+$/i.test(linkVideo)) {
-        return interaction.reply({ content: '🔗 Link inválido. Use http(s) ou deixe vazio e anexe o vídeo.', flags: 64 });
+        return interaction.reply({ content: '🔗 Link inválido. Use http(s) ou deixe vazio e anexe o vídeo.', ephemeral: true });
       }
 
       const requerenteName = interaction.member?.displayName || interaction.user.username;
@@ -265,7 +273,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
 
           analisePick.delete(interaction.user.id);
-          return interaction.reply({ content: `✅ Pedido enviado em ${post.toString()}`, flags: 64 });
+          return interaction.reply({ content: `✅ Pedido enviado em ${post.toString()}`, ephemeral: true });
         }
 
         if (target.type === ChannelType.GuildText) {
@@ -289,12 +297,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
 
           analisePick.delete(interaction.user.id);
-          return interaction.reply({ content: `✅ Pedido enviado. Discussão: ${thread.toString()}`, flags: 64 });
+          return interaction.reply({ content: `✅ Pedido enviado. Discussão: ${thread.toString()}`, ephemeral: true });
         }
 
       } catch (e) {
         console.error('Falha ao publicar:', e?.message || e);
-        return interaction.reply({ content: '❌ Erro ao publicar. Verifique canal/permissões.', flags: 64 });
+        return interaction.reply({ content: '❌ Erro ao publicar. Verifique canal/permissões.', ephemeral: true });
       }
     }
 
@@ -303,10 +311,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       // Painel da Comissão (ephemeral)
       if (interaction.customId === 'panel_comissao') {
         if (!hasStaffPerm(interaction.member)) {
-          return interaction.reply({ content: '❌ Apenas Comissão/Diretoria têm acesso ao painel.', flags: 64 });
+          return interaction.reply({ content: '❌ Apenas Comissão/Diretoria têm acesso ao painel.', ephemeral: true });
         }
         if (!interaction.channel?.isThread?.()) {
-          return interaction.reply({ content: '⚠️ Use dentro do tópico da análise.', flags: 64 });
+          return interaction.reply({ content: '⚠️ Use dentro do tópico da análise.', ephemeral: true });
         }
 
         const bCulpado  = new ButtonBuilder().setCustomId('eval_culpado').setLabel('Culpado').setStyle(ButtonStyle.Danger);
@@ -320,7 +328,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.reply({
           content: '🛠️ **Painel da Comissão** — escolha o resultado ou anexe evidências.',
           components: [rowA, rowB],
-          flags: 64,
+          ephemeral: true,
         });
       }
 
@@ -328,66 +336,61 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.customId.startsWith('attach_pedido:')) {
         const [, reqId] = interaction.customId.split(':');
         if (interaction.user.id !== reqId && !hasStaffPerm(interaction.member)) {
-          return interaction.reply({ content: '❌ Só o **requerente** (ou staff) pode anexar o vídeo do pedido.', flags: 64 });
+          return interaction.reply({ content: '❌ Só o **requerente** (ou staff) pode anexar o vídeo do pedido.', ephemeral: true });
         }
         if (!interaction.channel?.isThread?.()) {
-          return interaction.reply({ content: '⚠️ Use o botão **dentro do tópico** da análise.', flags: 64 });
+          return interaction.reply({ content: '⚠️ Use o botão **dentro do tópico** da análise.', ephemeral: true });
         }
         evidenceSessions.set(interaction.user.id, { kind: 'pedido', threadId: interaction.channel.id, exp: Date.now() + 2 * 60 * 1000 });
-        return interaction.reply({ content: '📥 Envie o **arquivo de vídeo** aqui em até **2 minutos**.', flags: 64 });
+        return interaction.reply({ content: '📥 Envie o **arquivo de vídeo** aqui em até **2 minutos**.', ephemeral: true });
       }
 
       // Anexar evidências (Comissão)
       if (interaction.customId === 'attach_avaliacao') {
         if (!hasStaffPerm(interaction.member)) {
-          return interaction.reply({ content: '❌ Apenas Comissão/Diretoria podem anexar evidências.', flags: 64 });
+          return interaction.reply({ content: '❌ Apenas Comissão/Diretoria podem anexar evidências.', ephemeral: true });
         }
         if (!interaction.channel?.isThread?.()) {
-          return interaction.reply({ content: '⚠️ Use o botão **dentro do tópico**.', flags: 64 });
+          return interaction.reply({ content: '⚠️ Use o botão **dentro do tópico**.', ephemeral: true });
         }
         evidenceSessions.set(interaction.user.id, { kind: 'avaliacao', threadId: interaction.channel.id, exp: Date.now() + 2 * 60 * 1000 });
-        return interaction.reply({ content: '📥 Envie a(s) **imagem(ns)/arquivo(s)** aqui em até **2 minutos**.', flags: 64 });
+        return interaction.reply({ content: '📥 Envie a(s) **imagem(ns)/arquivo(s)** aqui em até **2 minutos**.', ephemeral: true });
       }
 
       // Anexar vídeo da defesa
       if (interaction.customId.startsWith('attach_defesa:')) {
         const [, reqdId] = interaction.customId.split(':');
         if (interaction.user.id !== reqdId && !hasStaffPerm(interaction.member)) {
-          return interaction.reply({ content: '❌ Só o **requerido** (ou staff) pode anexar o vídeo da defesa.', flags: 64 });
+          return interaction.reply({ content: '❌ Só o **requerido** (ou staff) pode anexar o vídeo da defesa.', ephemeral: true });
         }
         if (!interaction.channel?.isThread?.()) {
-          return interaction.reply({ content: '⚠️ Use o botão **dentro do tópico**.', flags: 64 });
+          return interaction.reply({ content: '⚠️ Use o botão **dentro do tópico**.', ephemeral: true });
         }
         evidenceSessions.set(interaction.user.id, { kind: 'defesa', threadId: interaction.channel.id, exp: Date.now() + 2 * 60 * 1000 });
-        return interaction.reply({ content: '📥 Envie o **arquivo de vídeo da defesa** aqui em até **2 minutos**.', flags: 64 });
+        return interaction.reply({ content: '📥 Envie o **arquivo de vídeo da defesa** aqui em até **2 minutos**.', ephemeral: true });
       }
 
-      // Abrir modal de avaliação (Culpado/Inocente/Indeferido) — NOVO FORMULÁRIO
-      if (['eval_culpado', 'eval_inocente', 'eval_indeferido'].includes(interaction.customId)) {
-        if (!hasStaffPerm(interaction.member)) {
-          return interaction.reply({ content: '❌ Apenas Comissão/Diretoria podem julgar.', flags: 64 });
+      // Botão "Enviar defesa" (abre modal) — RESPOSTA ÚNICA: showModal
+      if (interaction.customId.startsWith('defesa_btn:')) {
+        const [, alvoId] = interaction.customId.split(':');
+        const isMod = hasStaffPerm(interaction.member);
+        if (alvoId !== 'any' && interaction.user.id !== alvoId && !isMod) {
+          return interaction.reply({ content: '❌ Este botão é apenas para o **requerido** (ou moderadores).', ephemeral: true });
         }
         if (!interaction.channel?.isThread?.()) {
-          return interaction.reply({ content: '⚠️ Use os botões **dentro do tópico**.', flags: 64 });
+          return interaction.reply({ content: '⚠️ Use o botão **dentro do tópico**.', ephemeral: true });
         }
-        const resultado =
-          interaction.customId === 'eval_culpado' ? 'Procedente' :
-          interaction.customId === 'eval_inocente' ? 'Improcedente' :
-          'Indeferido';
 
-        const modal = new ModalBuilder().setCustomId(`avaliacao_modal:${resultado}`).setTitle(`Julgamento — ${resultado}`);
+        // prepara sessão rapidamente (sem awaits longos)
+        defenseSessions.set(interaction.user.id, { threadId: interaction.channel.id, exp: Date.now() + 30 * 60 * 1000 });
 
-        const parag = new TextInputBuilder().setCustomId('avaliacao_parag').setLabel('Parágrafo do regulamento (ex.: 14.5)').setStyle(TextInputStyle.Short).setRequired(true);
-        const puni  = new TextInputBuilder().setCustomId('avaliacao_punicao').setLabel('Punição (ex.: +5s, advertência...)').setStyle(TextInputStyle.Short).setRequired(true);
-        const arg   = new TextInputBuilder().setCustomId('avaliacao_arg').setLabel('Argumento da comissão').setStyle(TextInputStyle.Paragraph).setRequired(true);
+        const modal = new ModalBuilder().setCustomId('defesa_modal').setTitle('Defesa do Requerido');
+        const link = new TextInputBuilder().setCustomId('defesa_link').setLabel('Link do vídeo (opcional)').setStyle(TextInputStyle.Short).setRequired(false);
+        const arg  = new TextInputBuilder().setCustomId('defesa_arg').setLabel('Argumento da defesa').setStyle(TextInputStyle.Paragraph).setRequired(true);
+        modal.addComponents(new ActionRowBuilder().addComponents(link), new ActionRowBuilder().addComponents(arg));
 
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(parag),
-          new ActionRowBuilder().addComponents(puni),
-          new ActionRowBuilder().addComponents(arg),
-        );
         await interaction.showModal(modal);
-        return;
+        return; // importante: não enviar outro reply nesta interação
       }
     }
 
@@ -395,12 +398,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isModalSubmit() && interaction.customId === 'defesa_modal') {
       const sess = defenseSessions.get(interaction.user.id);
       if (!sess || (sess.exp && sess.exp < Date.now())) {
-        return interaction.reply({ content: '⚠️ Sessão expirada. Use o botão novamente.', flags: 64 });
+        return interaction.reply({ content: '⚠️ Sessão expirada. Use o botão novamente.', ephemeral: true });
       }
       const link = (interaction.fields.getTextInputValue('defesa_link') || '').trim();
       const arg  = interaction.fields.getTextInputValue('defesa_arg').trim();
       if (link && !/^https?:\/\/\S+$/i.test(link)) {
-        return interaction.reply({ content: '🔗 Link inválido. Use http(s) ou anexe depois.', flags: 64 });
+        return interaction.reply({ content: '🔗 Link inválido. Use http(s) ou anexe depois.', ephemeral: true });
       }
 
       const defense = new EmbedBuilder()
@@ -422,17 +425,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
         } else {
           await thread.send({ embeds: [defense] });
         }
-        await interaction.reply({ content: '✅ Defesa enviada.', flags: 64 });
+        await interaction.reply({ content: '✅ Defesa enviada.', ephemeral: true });
       } catch (e) {
         console.error('Falha ao postar defesa:', e?.message || e);
-        await interaction.reply({ content: '❌ Não consegui postar a defesa.', flags: 64 });
+        await interaction.reply({ content: '❌ Não consegui postar a defesa.', ephemeral: true });
       } finally {
         defenseSessions.delete(interaction.user.id);
       }
       return;
     }
 
-    /* ========== Modal AVALIAÇÃO (Comissão) — ANÔNIMA (NOVO) ========== */
+    /* ========== Modal AVALIAÇÃO (Comissão) — ANÔNIMA ========== */
     if (interaction.isModalSubmit() && interaction.customId.startsWith('avaliacao_modal:')) {
       const resultado = interaction.customId.split(':')[1]; // Procedente / Improcedente / Indeferido
       const paragrafo = interaction.fields.getTextInputValue('avaliacao_parag').trim();
@@ -475,7 +478,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
         }
 
-        await interaction.reply({ content: '✅ Decisão registrada pela **Comissão**.', flags: 64 });
+        await interaction.reply({ content: '✅ Decisão registrada pela **Comissão**.', ephemeral: true });
 
         // (Opcional) log interno de auditoria
         if (LOG_CHANNEL_ID) {
@@ -487,14 +490,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       } catch (e) {
         console.error('Falha ao registrar julgamento:', e?.message || e);
-        await interaction.reply({ content: '❌ Não consegui registrar o julgamento.', flags: 64 });
+        await interaction.reply({ content: '❌ Não consegui registrar o julgamento.', ephemeral: true });
       }
       return;
     }
 
+    /* ========== Botões já tratados acima; nada mais aqui ========== */
+
   } catch (err) {
     console.error(err);
-    try { await interaction.reply({ content: 'Ocorreu um erro ao processar.', flags: 64 }); } catch {}
+    try { await interaction.reply({ content: 'Ocorreu um erro ao processar.', ephemeral: true }); } catch {}
   }
 });
 
