@@ -162,16 +162,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       analisePick.set(interaction.user.id, { requeridoId, exp: Date.now() + 10 * 60 * 1000 });
 
+      // MODAL DO PEDIDO (simplificado — sem "Parágrafo")
       const modal = new ModalBuilder().setCustomId('analise_modal').setTitle('Pedido de Análise');
 
       const linkVideo = new TextInputBuilder().setCustomId('linkVideo').setLabel('Link do vídeo (opcional)').setStyle(TextInputStyle.Short).setRequired(false);
-      const paragrafo = new TextInputBuilder().setCustomId('paragrafo').setLabel('Parágrafo (ex.: 14.5)').setStyle(TextInputStyle.Short).setRequired(true);
-      const tipoDano = new TextInputBuilder().setCustomId('tipoDano').setLabel('Tipo de dano').setStyle(TextInputStyle.Short).setRequired(true);
+      const tipoDano  = new TextInputBuilder().setCustomId('tipoDano').setLabel('Tipo de dano').setStyle(TextInputStyle.Short).setRequired(true);
       const argumento = new TextInputBuilder().setCustomId('argumento').setLabel('Argumento (explique o lance)').setStyle(TextInputStyle.Paragraph).setRequired(true);
 
       modal.addComponents(
         new ActionRowBuilder().addComponents(linkVideo),
-        new ActionRowBuilder().addComponents(paragrafo),
         new ActionRowBuilder().addComponents(tipoDano),
         new ActionRowBuilder().addComponents(argumento),
       );
@@ -179,7 +178,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return interaction.showModal(modal);
     }
 
-    /* ========== Modal do Pedido: usa o requerido escolhido ========== */
+    /* ========== Modal do Pedido ========== */
     if (interaction.isModalSubmit() && interaction.customId === 'analise_modal') {
       const pick = analisePick.get(interaction.user.id);
       if (!pick || pick.exp < Date.now()) {
@@ -191,8 +190,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const mentionRequerido = requeridoUser ? `<@${requeridoUser.id}>` : null;
 
       const linkVideo = (interaction.fields.getTextInputValue('linkVideo') || '').trim();
-      const paragrafo = interaction.fields.getTextInputValue('paragrafo').trim();
-      const tipoDano = interaction.fields.getTextInputValue('tipoDano').trim();
+      const tipoDano  = interaction.fields.getTextInputValue('tipoDano').trim();
       const argumento = interaction.fields.getTextInputValue('argumento').trim();
 
       if (linkVideo && !/^https?:\/\/\S+$/i.test(linkVideo)) {
@@ -200,18 +198,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       const requerenteName = interaction.member?.displayName || interaction.user.username;
-      const requeridoName = requeridoUser?.username || 'Desconhecido';
+      const requeridoName  = requeridoUser?.username || 'Desconhecido';
       const threadName = `analise ${requerenteName} vs ${requeridoName}`.slice(0, 90);
 
       const embed = new EmbedBuilder()
         .setTitle('📋 Pedido de Análise')
         .addFields(
           { name: 'Requerente', value: `${requerente}`, inline: false },
-          { name: 'Requerido', value: mentionRequerido || requeridoName, inline: false },
+          { name: 'Requerido',  value: mentionRequerido || requeridoName, inline: false },
           ...(linkVideo ? [{ name: 'Link do vídeo', value: linkVideo, inline: false }] : []),
-          { name: 'Parágrafo', value: paragrafo, inline: false },
           { name: 'Tipo de dano', value: tipoDano, inline: true },
-          { name: 'Argumento', value: argumento.slice(0, 1024), inline: false },
+          { name: 'Argumento',   value: argumento.slice(0, 1024), inline: false },
         )
         .setFooter({ text: 'Status: Em análise' })
         .setTimestamp();
@@ -246,17 +243,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           const post = await target.threads.create({
             name: threadName,
-            message: {
-              content: msgContent,
-              embeds: [embed],
-              components: [rowPublic],
-              allowedMentions,
-            },
+            message: { content: msgContent, embeds: [embed], components: [rowPublic], allowedMentions },
             appliedTags: tagInicial ? [tagInicial] : [],
             reason: 'Novo pedido de análise',
           });
 
-          // Guardião: registra quem pode falar neste tópico
           allowedByThread.set(post.id, buildAllowedSet({
             comissaoRoleId: COMISSAO_ROLE_ID,
             diretoriaRoleId: DIRETORIA_ROLE_ID,
@@ -270,31 +261,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
           if (requeridoUser) { try { await requeridoUser.send(`📣 Você foi mencionado em um **pedido de análise** por ${requerente}.\n🔗 ${post.url}`); } catch {} }
 
           if (LOG_CHANNEL_ID) {
-            try {
-              const logCh = await interaction.client.channels.fetch(LOG_CHANNEL_ID);
-              await logCh.send(`📣 Novo pedido de análise aberto: ${post.url}`);
-            } catch {}
+            try { const logCh = await interaction.client.channels.fetch(LOG_CHANNEL_ID); await logCh.send(`📣 Novo pedido de análise aberto: ${post.url}`); } catch {}
           }
 
           analisePick.delete(interaction.user.id);
           return interaction.reply({ content: `✅ Pedido enviado em ${post.toString()}`, flags: 64 });
         }
 
-        // Canal de texto (thread anexo)
         if (target.type === ChannelType.GuildText) {
-          const msg = await target.send({
-            content: msgContent,
-            embeds: [embed],
-            components: [rowPublic],
-            allowedMentions,
-          });
-          const thread = await msg.startThread({
-            name: threadName,
-            autoArchiveDuration: 1440,
-            reason: 'Discussão de análise',
-          });
+          const msg = await target.send({ content: msgContent, embeds: [embed], components: [rowPublic], allowedMentions });
+          const thread = await msg.startThread({ name: threadName, autoArchiveDuration: 1440, reason: 'Discussão de análise' });
 
-          // Guardião: registra quem pode falar neste tópico
           allowedByThread.set(thread.id, buildAllowedSet({
             comissaoRoleId: COMISSAO_ROLE_ID,
             diretoriaRoleId: DIRETORIA_ROLE_ID,
@@ -308,10 +285,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           if (requeridoUser) { try { await requeridoUser.send(`📣 Você foi mencionado em um **pedido de análise** por ${requerente}.\n🔗 ${thread.url}`); } catch {} }
 
           if (LOG_CHANNEL_ID) {
-            try {
-              const logCh = await interaction.client.channels.fetch(LOG_CHANNEL_ID);
-              await logCh.send(`📣 Novo pedido de análise aberto: ${thread.url}`);
-            } catch {}
+            try { const logCh = await interaction.client.channels.fetch(LOG_CHANNEL_ID); await logCh.send(`📣 Novo pedido de análise aberto: ${thread.url}`); } catch {}
           }
 
           analisePick.delete(interaction.user.id);
@@ -388,7 +362,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.reply({ content: '📥 Envie o **arquivo de vídeo da defesa** aqui em até **2 minutos**.', flags: 64 });
       }
 
-      // Abrir modal de avaliação (Culpado/Inocente/Indeferido)
+      // Abrir modal de avaliação (Culpado/Inocente/Indeferido) — NOVO FORMULÁRIO
       if (['eval_culpado', 'eval_inocente', 'eval_indeferido'].includes(interaction.customId)) {
         if (!hasStaffPerm(interaction.member)) {
           return interaction.reply({ content: '❌ Apenas Comissão/Diretoria podem julgar.', flags: 64 });
@@ -402,29 +376,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
           'Indeferido';
 
         const modal = new ModalBuilder().setCustomId(`avaliacao_modal:${resultado}`).setTitle(`Julgamento — ${resultado}`);
-        const link = new TextInputBuilder().setCustomId('avaliacao_link').setLabel('Link (opcional)').setStyle(TextInputStyle.Short).setRequired(false);
-        const arg  = new TextInputBuilder().setCustomId('avaliacao_arg').setLabel('Argumento da comissão').setStyle(TextInputStyle.Paragraph).setRequired(true);
-        modal.addComponents(new ActionRowBuilder().addComponents(link), new ActionRowBuilder().addComponents(arg));
-        await interaction.showModal(modal);
-        return;
-      }
 
-      // Botão "Enviar defesa" (abre modal)
-      if (interaction.customId.startsWith('defesa_btn:')) {
-        const [, alvoId] = interaction.customId.split(':');
-        const isMod = hasStaffPerm(interaction.member);
-        if (alvoId !== 'any' && interaction.user.id !== alvoId && !isMod) {
-          return interaction.reply({ content: '❌ Este botão é apenas para o **requerido** (ou moderadores).', flags: 64 });
-        }
-        if (!interaction.channel?.isThread?.()) {
-          return interaction.reply({ content: '⚠️ Use o botão **dentro do tópico**.', flags: 64 });
-        }
-        defenseSessions.set(interaction.user.id, { threadId: interaction.channel.id, exp: Date.now() + 30 * 60 * 1000 });
+        const parag = new TextInputBuilder().setCustomId('avaliacao_parag').setLabel('Parágrafo do regulamento (ex.: 14.5)').setStyle(TextInputStyle.Short).setRequired(true);
+        const puni  = new TextInputBuilder().setCustomId('avaliacao_punicao').setLabel('Punição (ex.: +5s, advertência...)').setStyle(TextInputStyle.Short).setRequired(true);
+        const arg   = new TextInputBuilder().setCustomId('avaliacao_arg').setLabel('Argumento da comissão').setStyle(TextInputStyle.Paragraph).setRequired(true);
 
-        const modal = new ModalBuilder().setCustomId('defesa_modal').setTitle('Defesa do Requerido');
-        const link = new TextInputBuilder().setCustomId('defesa_link').setLabel('Link do vídeo (opcional)').setStyle(TextInputStyle.Short).setRequired(false);
-        const arg  = new TextInputBuilder().setCustomId('defesa_arg').setLabel('Argumento da defesa').setStyle(TextInputStyle.Paragraph).setRequired(true);
-        modal.addComponents(new ActionRowBuilder().addComponents(link), new ActionRowBuilder().addComponents(arg));
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(parag),
+          new ActionRowBuilder().addComponents(puni),
+          new ActionRowBuilder().addComponents(arg),
+        );
         await interaction.showModal(modal);
         return;
       }
@@ -471,21 +432,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    /* ========== Modal AVALIAÇÃO (Comissão) — ANÔNIMA ========== */
+    /* ========== Modal AVALIAÇÃO (Comissão) — ANÔNIMA (NOVO) ========== */
     if (interaction.isModalSubmit() && interaction.customId.startsWith('avaliacao_modal:')) {
       const resultado = interaction.customId.split(':')[1]; // Procedente / Improcedente / Indeferido
-      const link = (interaction.fields.getTextInputValue('avaliacao_link') || '').trim();
-      const arg  = interaction.fields.getTextInputValue('avaliacao_arg').trim();
-      if (link && !/^https?:\/\/\S+$/i.test(link)) {
-        return interaction.reply({ content: '🔗 Link inválido. Use http(s) ou anexe como evidência.', flags: 64 });
-      }
+      const paragrafo = interaction.fields.getTextInputValue('avaliacao_parag').trim();
+      const punicao   = interaction.fields.getTextInputValue('avaliacao_punicao').trim();
+      const argumento = interaction.fields.getTextInputValue('avaliacao_arg').trim();
 
       const emb = new EmbedBuilder()
         .setAuthor({ name: 'Comissão' }) // não expõe o comissário
         .setTitle(`📑 Julgamento — ${resultado}`)
         .addFields(
-          ...(link ? [{ name: 'Link de evidência', value: link, inline: false }] : []),
-          { name: 'Argumento', value: arg.slice(0, 1024), inline: false },
+          { name: 'Parágrafo do regulamento', value: paragrafo.slice(0, 256), inline: false },
+          { name: 'Punição', value: punicao.slice(0, 256), inline: false },
+          { name: 'Argumento', value: argumento.slice(0, 1024), inline: false },
         )
         .setTimestamp();
       const c4 = colorInt(); if (c4 !== undefined) emb.setColor(c4);
@@ -521,7 +481,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (LOG_CHANNEL_ID) {
           try {
             const ch = await client.channels.fetch(LOG_CHANNEL_ID);
-            await ch.send(`🕵️ Decisão **${resultado}** registrada por ${interaction.user.tag} em ${thread.url}`);
+            await ch.send(`🕵️ Decisão **${resultado}** registrada por ${interaction.user.tag} em ${thread.url}\nParágrafo: ${paragrafo}\nPunição: ${punicao}`);
           } catch {}
         }
 
